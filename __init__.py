@@ -20,6 +20,7 @@ class PressReaderDeduplicator(FileTypePlugin):
     minimum_calibre_version = (5, 0, 0)  # Python 3.
     file_types              = {'epub'}
     on_import               = True # Runs when adding to library
+    on_postimport           = True
     # on_preprocess           = True # sadly it interferes with Plumber and causes an infinite loop
     priority                = 100
 
@@ -337,18 +338,26 @@ class PressReaderDeduplicator(FileTypePlugin):
             tmp_path.unlink(missing_ok=True)
             raise
 
+    def postimport(self, book_id, book_format, db):
+        print(f"Deduplicator: postimport called {book_id} {book_format}")
+        if book_format.lower() != 'epub':
+            return
+        mi = db.get_metadata(book_id, index_is_id=True)
+        new_title = self._reformat_title(mi.title)
+        if new_title:
+            mi.title = new_title
+            mi.title_sort = None
+            db.set_metadata(book_id, mi)
+
     def _convert_epub(self, path_to_ebook):
         tmp_fd, tmp_path = tempfile.mkstemp(suffix='.epub')
         os.close(tmp_fd)
         try:
             plumber = Plumber(path_to_ebook, tmp_path, default_log)
-            new_title = self._reformat_title(path_to_ebook)
             recommendations = [
                 ('output_profile', 'kindle_oasis', OptionRecommendation.HIGH),
                 ('epub_version', '3', OptionRecommendation.HIGH),
             ]
-            if new_title:
-                recommendations.append(('title', new_title, OptionRecommendation.HIGH))
             plumber.merge_ui_recommendations(recommendations)
             plumber.run()
             os.replace(tmp_path, path_to_ebook)
@@ -357,21 +366,12 @@ class PressReaderDeduplicator(FileTypePlugin):
             print(f"Deduplicator: Conversion failed: {e}")
             Path(tmp_path).unlink(missing_ok=True)
 
-    def _reformat_title(self, path_to_ebook):
-        """Reformats the title date from 'Name (DD Mon YYYY)' to 'Name (YYYY Mon DD)'."""
-        try:
-            with zipfile.ZipFile(path_to_ebook, 'r') as z:
-                opf_path = next(f for f in z.namelist() if f.endswith('.opf'))
-                with z.open(opf_path) as f:
-                    opf_content = f.read().decode('utf-8', errors='ignore')
-            match = re.search(r'<dc:title>(.*?)\((\d{1,2})\s+(\w{3})\s+(\d{4})\)</dc:title>', opf_content)
-            if not match:
-                return None
-            name, day, mon, year = match.group(1).strip(), match.group(2), match.group(3), match.group(4)
-            return f"{name} ({year} {mon} {int(day):02d})"
-        except Exception as e:
-            print(f"Deduplicator: Title reformat failed: {e}")
+    def _reformat_title(self, title_str):
+        match = re.search(r'^(.*?)\((\d{1,2})\s+(\w{3})\s+(\d{4})\)$', title_str.strip())
+        if not match:
             return None
+        name, day, mon, year = match.group(1).strip(), match.group(2), match.group(3), match.group(4)
+        return f"{name} ({year} {mon} {int(day):02d})"
 
     def _is_dead_ref(self, rel_path, anchor, deleted_rel_paths, anchors_deleted):
         if rel_path in deleted_rel_paths:
