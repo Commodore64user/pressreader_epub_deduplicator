@@ -1,15 +1,15 @@
+import hashlib
 import os
 import re
-import hashlib
-import zipfile
 import tempfile
-from pathlib import Path
-from collections import defaultdict
+import zipfile
 from bs4 import BeautifulSoup
 from calibre.customize import FileTypePlugin
+from calibre.customize.conversion import OptionRecommendation
 from calibre.ebooks.conversion.plumber import Plumber
 from calibre.utils.logging import default_log
-from calibre.customize.conversion import OptionRecommendation
+from collections import defaultdict
+from pathlib import Path
 
 class PressReaderDeduplicator(FileTypePlugin):
     name                    = 'PressReader ePub Deduplicator'
