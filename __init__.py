@@ -12,7 +12,7 @@ from collections import defaultdict
 from pathlib import Path
 
 class PressReaderDeduplicator(FileTypePlugin):
-    name                    = 'PressReader ePub Deduplicator'
+    name                    = 'PressReader ePub deDuplicator'
     description             = 'Automatically removes duplicate articles from PressReader-generated ePubs.'
     supported_platforms     = ['windows', 'osx', 'linux']
     author                  = 'Commodore64user'
@@ -78,6 +78,7 @@ class PressReaderDeduplicator(FileTypePlugin):
 
                 # Stage 3: Decompose duplicate articles, track removed anchors
                 anchors_deleted = set()
+                files_to_delete = set()
                 metadata_base_path = next(temp_path.glob("**/OEBPS"), temp_path)
 
                 for xhtml_file in all_xhtml_files:
@@ -91,18 +92,32 @@ class PressReaderDeduplicator(FileTypePlugin):
                                 rel = xhtml_file.relative_to(metadata_base_path).as_posix()
                                 anchors_deleted.add((rel, anchor_id))
                             article.decompose()
+                    # Track files that are now empty (calibre type only needs this)
+                    articles_kept = sum(1 for a in articles_in_file
+                                        if (hash_cache[xhtml_file][id(a)], xhtml_file) in articles_to_keep)
+                    if len(articles_in_file) > 0 and articles_kept == 0:
+                        files_to_delete.add(xhtml_file)
                     with open(xhtml_file, 'w', encoding='utf-8') as f:
                         f.write(str(soup))
 
                 dupe_count = sum(len(v) - 1 for v in hashes_to_paths.values() if len(v) > 1)
-                print(f"Deduplicator: Found {len(all_xhtml_files)} xhtml files")
-                print(f"Deduplicator: {len(hashes_to_paths)} unique article hashes")
-                print(f"Deduplicator: {sum(1 for v in hashes_to_paths.values() if len(v) > 1)} hashes with duplicates")
-                print(f"Deduplicator: {dupe_count} duplicate articles removed")
+                print(f"deDuplicator: Found {len(all_xhtml_files)} xhtml files")
+                print(f"deDuplicator: {len(hashes_to_paths)} unique article hashes")
+                print(f"deDuplicator: {sum(1 for v in hashes_to_paths.values() if len(v) > 1)} hashes with duplicates")
+                print(f"deDuplicator: {dupe_count} duplicate articles removed")
 
                 # Stage 4: Clean dead anchor references from nav files
-                if anchors_deleted:
-                    self.clean_nav_files(temp_path, epub_type, anchors_deleted)
+                deleted_rel_paths = None
+                if epub_type == 'calibre' and files_to_delete:
+                    deleted_rel_paths = {re.sub(r'^OEBPS/', '', f.relative_to(temp_path).as_posix()) for f in files_to_delete}
+
+                if anchors_deleted or deleted_rel_paths:
+                    self.clean_nav_files(temp_path, epub_type, anchors_deleted, deleted_rel_paths)
+                    # Stage 4.5: For calibre epubs, clean manifest and delete empty files
+                    # Plumber splits articles into individual xhtml files; when all articles
+                    # in a split file are removed, the file becomes an empty (blank) page.
+                    if deleted_rel_paths:
+                        self._clean_calibre_manifest(temp_path, files_to_delete)
 
                 # Stage 5: Re-pack the ePub back into the original temporary path
                 repack_tmp = Path(self.temporary_file('.epub').name)
@@ -132,7 +147,7 @@ class PressReaderDeduplicator(FileTypePlugin):
                 # Note: At this point, calibre runs postimport(), which in our case renames
                 #       the file, so it can be sorted by year, i.e., (2026 Mar 13)
             except Exception as e:
-                print(f"Deduplicator: Processing failed: {e}")
+                print(f"deDuplicator: Processing failed: {e}")
                 return path_to_ebook
 
     def pre_check(self, path_to_ebook):
@@ -149,19 +164,19 @@ class PressReaderDeduplicator(FileTypePlugin):
                 pattern = r"<(?:dc:creator|dc:publisher)[^>]*>(.*?)</(?:dc:creator|dc:publisher)>"
                 matches = re.findall(pattern, opf_content, re.IGNORECASE)
                 if not any("NewspaperDirect" in match for match in matches):
-                    print('Deduplicator: Not a PressReader ePub, aborting')
+                    print('deDuplicator: Not a PressReader ePub, aborting')
                     return None
-                print('\nDeduplicator: PressReader ePub confirmed via metadata')
+                print('\ndeDuplicator: PressReader ePub confirmed via metadata')
 
                 meta_match = re.search(r"<metadata(.*?)>", opf_content, re.DOTALL | re.IGNORECASE)
                 if meta_match and 'calibre.kovidgoyal.net' in meta_match.group(1).lower():
-                    print('Deduplicator: Previously converted by calibre')
+                    print('deDuplicator: Previously converted by calibre')
                     return 'calibre'
 
-                print(f"Deduplicator: Raw PressReader ePub detected")
+                print(f"deDuplicator: Raw PressReader ePub detected")
                 return 'raw'
         except Exception as e:
-            print(f"Deduplicator: Pre-check failed: {e}")
+            print(f"deDuplicator: Pre-check failed: {e}")
             return None
 
     def get_article_hash(self, article_tag):
@@ -202,7 +217,7 @@ class PressReaderDeduplicator(FileTypePlugin):
                 break
         return candidate_path
 
-    def clean_nav_files(self, temp_path, epub_type, anchors_deleted):
+    def clean_nav_files(self, temp_path, epub_type, anchors_deleted, deleted_rel_paths=None):
         """Removes dead anchor references from NCX and nav.xhtml files."""
         if epub_type == 'raw':
             # In raw files, opf and ncx are inside OEBPS
@@ -217,7 +232,7 @@ class PressReaderDeduplicator(FileTypePlugin):
                     continue
                 content = navpoint.find('content')
                 if content and content.get('src'):
-                    yield navpoint, content['src']
+                    yield navpoint, re.sub(r'^OEBPS/', '', content['src'])
 
         def _get_nav_nodes(soup):
             for li in soup.find_all('li'):
@@ -225,13 +240,13 @@ class PressReaderDeduplicator(FileTypePlugin):
                 if a:
                     yield li, re.sub(r'^OEBPS/', '', a['href'])
 
-        ncx_file = next(metadata_base_path.glob("*.ncx"), None)
+        ncx_file = next(metadata_base_path.glob("**/*.ncx"), None)
         if ncx_file:
-            self._clean_nav(ncx_file, _get_ncx_nodes, anchors_deleted)
+            self._clean_nav(ncx_file, _get_ncx_nodes, anchors_deleted, deleted_rel_paths)
 
         nav_file = next(metadata_base_path.glob("**/nav.xhtml"), None)
         if nav_file:
-            self._clean_nav(nav_file, _get_nav_nodes, anchors_deleted)
+            self._clean_nav(nav_file, _get_nav_nodes, anchors_deleted, deleted_rel_paths)
 
     def _safe_write_xml(self, target_file, soup):
         dir_ = target_file.parent
@@ -251,9 +266,9 @@ class PressReaderDeduplicator(FileTypePlugin):
         new_title = self._reformat_title(mi.title)
         if new_title:
             mi.title = new_title
-            mi.title_sort = None
+            mi.title_sort = None # force calibre to update the sort-title using our new_title
             db.set_metadata(book_id, mi)
-            print(f"Deduplicator: Title reformatted to '{new_title}'")
+            print(f"deDuplicator: Title reformatted to '{new_title}'")
 
     def _convert_epub(self, path_to_ebook):
         tmp_path = self.temporary_file('.epub').name
@@ -265,26 +280,67 @@ class PressReaderDeduplicator(FileTypePlugin):
             ])
             plumber.run()
             os.replace(tmp_path, path_to_ebook)
-            print(f"Deduplicator: ePub conversion complete")
+            print(f"deDuplicator: ePub conversion complete")
         except Exception as e:
-            print(f"Deduplicator: Conversion failed: {e}")
+            print(f"deDuplicator: Conversion failed: {e}")
             Path(tmp_path).unlink(missing_ok=True)
 
     def _reformat_title(self, title_str):
+        months = {
+            'Jan':'01', 'Feb':'02', 'Mar':'03', 'Apr':'04', 'May':'05', 'Jun':'06',
+            'Jul':'07', 'Aug':'08', 'Sep':'09', 'Oct':'10', 'Nov':'11', 'Dec':'12'
+        }
         match = re.search(r'^(.*?)\((\d{1,2})\s+(\w{3})\s+(\d{4})\)$', title_str.strip())
         if not match:
             return None
-        name, day, mon, year = match.group(1).strip(), match.group(2), match.group(3), match.group(4)
-        return f"{name} ({year} {mon} {int(day):02d})"
+        name, day, month, year = match.group(1).strip(), match.group(2), match.group(3), match.group(4)
+        month_to_num = months.get(month)
+        if not month_to_num:
+            return None
+        return f"{name} ({year}-{month_to_num}-{int(day):02d})"
 
-    def _clean_nav(self, nav_file, get_nodes, anchors_deleted):
+
+    def _clean_nav(self, nav_file, get_nodes, anchors_deleted, deleted_rel_paths=None):
         with open(nav_file, 'r', encoding='utf-8') as f:
             soup = BeautifulSoup(f, 'xml')
         for node, src in list(get_nodes(soup)):
-            if '#' not in src:
-                continue
-            rel, anchor = src.split('#', 1)
-            if (rel, anchor) in anchors_deleted:
-                print(f"Deduplicator: Removing dead anchor from {nav_file.name}: {src}")
+            rel = src.split('#')[0]
+            anchor = src.split('#')[1] if '#' in src else None
+            if deleted_rel_paths and rel in deleted_rel_paths:
+                print(f"deDuplicator: Removing from {nav_file.name}: {src}")
+                node.decompose()
+            elif anchor and (rel, anchor) in anchors_deleted:
+                print(f"deDuplicator: Removing dead anchor from {nav_file.name}: {src}")
                 node.decompose()
         self._safe_write_xml(nav_file, soup)
+
+    def _clean_calibre_manifest(self, temp_path, files_to_delete):
+        metadata_base_path = temp_path
+        deleted_rel_paths = {f.relative_to(metadata_base_path).as_posix() for f in files_to_delete}
+
+        opf_file = next(metadata_base_path.glob("*.opf"), None)
+        if opf_file:
+            with open(opf_file, 'r', encoding='utf-8') as f:
+                soup = BeautifulSoup(f, 'xml')
+
+            ids_to_delete = set()
+            manifest = soup.find('manifest')
+            if manifest:
+                for item in manifest.find_all('item'):
+                    if item.get('href', '') in deleted_rel_paths:
+                        print(f"deDuplicator: Removing from manifest: {item.get('href')}")
+                        ids_to_delete.add(item.get('id'))
+                        item.decompose()
+
+            spine = soup.find('spine')
+            if spine:
+                for itemref in spine.find_all('itemref'):
+                    if itemref.get('idref') in ids_to_delete:
+                        itemref.decompose()
+
+            self._safe_write_xml(opf_file, soup)
+
+        for f in files_to_delete:
+            if f.is_file():
+                f.unlink()
+        print(f"deDuplicator: Removed {len(files_to_delete)} empty files from calibre epub")
