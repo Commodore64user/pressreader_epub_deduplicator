@@ -120,7 +120,9 @@ class PressReaderDeduplicator(FileTypePlugin):
                         self._clean_calibre_manifest(temp_path, files_to_delete)
 
                 # Stage 5: Re-pack the ePub back into the original temporary path
-                repack_tmp = Path(self.temporary_file('.epub').name)
+                repack_tmp_file = self.temporary_file('.epub')
+                repack_tmp_file.close()
+                repack_tmp = Path(repack_tmp_file.name)
                 try:
                     with zipfile.ZipFile(repack_tmp, 'w', zipfile.ZIP_DEFLATED) as zipf:
                         mimetype_path = temp_path / 'mimetype'
