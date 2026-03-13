@@ -120,7 +120,9 @@ class PressReaderDeduplicator(FileTypePlugin):
                         self._clean_calibre_manifest(temp_path, files_to_delete)
 
                 # Stage 5: Re-pack the ePub back into the original temporary path
-                repack_tmp = Path(self.temporary_file('.epub').name)
+                tmp = self.temporary_file('.epub')
+                tmp.close()
+                repack_tmp = Path(tmp.name)
                 try:
                     with zipfile.ZipFile(repack_tmp, 'w', zipfile.ZIP_DEFLATED) as zipf:
                         mimetype_path = temp_path / 'mimetype'
@@ -145,7 +147,7 @@ class PressReaderDeduplicator(FileTypePlugin):
                 return path_to_ebook
 
                 # Note: At this point, calibre runs postimport(), which in our case renames
-                #       the file, so it can be sorted by year, i.e., (2026 Mar 13)
+                #       the file, so it can be sorted by year, i.e., (2026-03-13)
             except Exception as e:
                 print(f"deDuplicator: Processing failed: {e}")
                 return path_to_ebook
@@ -271,7 +273,9 @@ class PressReaderDeduplicator(FileTypePlugin):
             print(f"deDuplicator: Title reformatted to '{new_title}'")
 
     def _convert_epub(self, path_to_ebook):
-        tmp_path = self.temporary_file('.epub').name
+        tmp = self.temporary_file('.epub')
+        tmp.close()
+        tmp_path = tmp.name
         try:
             plumber = Plumber(path_to_ebook, tmp_path, default_log)
             plumber.merge_ui_recommendations([
